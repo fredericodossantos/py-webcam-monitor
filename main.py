@@ -7,6 +7,7 @@ from datetime import datetime
 # --- CONFIGURATION ---
 ESP32_IP = "192.168.1.4" # Make sure this IP is correct
 stream_url = f"http://{ESP32_IP}:81/stream"
+# We are keeping the LED control, so these URLs remain
 led_on_url = f"http://{ESP32_IP}/led-on"
 led_off_url = f"http://{ESP32_IP}/led-off"
 
@@ -18,15 +19,15 @@ if not cap.isOpened():
     print(f"Error: Cannot open stream from ESP32-CAM at {stream_url}")
     sys.exit()
 
+## NEW: Initialize the HOG Person Detector
+hog = cv2.HOGDescriptor()
+hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+print("HOG Person Detector initialized.")
+
 # --- STATE VARIABLES ---
-background_frame = None
-detection_active = False
-motion_in_progress = False ## NEW: Flag to track if motion is currently happening
+led_is_on = False
 
-delay_seconds = 10
-start_time = time.time()
-
-print(f"Connection successful! Press 'L' to toggle LED. Press 'q' to exit.")
+print("System is active. Press 'L' to toggle LED. Press 'q' to exit.")
 
 # --- MAIN LOOP ---
 while True:
@@ -34,61 +35,34 @@ while True:
     if not ret:
         print("Stream ended or failed. Exiting...")
         break
-
-    if not detection_active:
-        elapsed_time = time.time() - start_time
-        if elapsed_time < delay_seconds:
-            # (Countdown logic is unchanged, but we won't display text on the frame)
-            pass # We just wait for the delay to pass
-        else:
-            print("Background set. Motion detection is now active.")
-            detection_active = True
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            background_frame = cv2.GaussianBlur(gray, (21, 21), 0)
-
-    if detection_active and background_frame is not None:
-        has_motion_this_frame = False # A flag for this specific frame
-        
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray_blur = cv2.GaussianBlur(gray, (21, 21), 0)
-        frame_delta = cv2.absdiff(background_frame, gray_blur)
-        thresh = cv2.threshold(frame_delta, 30, 255, cv2.THRESH_BINARY)[1]
-        thresh = cv2.dilate(thresh, None, iterations=2)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        for contour in contours:
-            if cv2.contourArea(contour) < 500:
-                continue
-            
-            has_motion_this_frame = True
-            (x, y, w, h) = cv2.boundingRect(contour)
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        
-        ## NEW LOGIC: Check for state changes
-        
-        # If we see motion now, but we didn't see it in the previous frame...
-        if has_motion_this_frame and not motion_in_progress:
-            now = datetime.now()
-            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-            print(f"ALERT: Motion detected at {timestamp}")
-            motion_in_progress = True # Set the flag to ON
-
-        # If we DON'T see motion now, but we DID see it in the previous frame...
-        elif not has_motion_this_frame and motion_in_progress:
-            print("--- Scene is quiet again. ---")
-            motion_in_progress = False # Reset the flag to OFF
-            
-
-    # We always display the video window
-    cv2.imshow('Webcam Monitor', frame)
     
+    # Optional: Resize the frame to make processing faster
+    # HOG can be slow on very large images.
+    frame = cv2.resize(frame, (640, 480))
+
+    ## MODIFIED: This is our new detection logic
+    # detectMultiScale returns the bounding boxes of detected people
+    boxes, weights = hog.detectMultiScale(frame, winStride=(8,8), padding=(32,32), scale=1.05)
+
+    # If at least one person was detected in this frame
+    if len(boxes) > 0:
+        now = datetime.now()
+        timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"PERSON DETECTED at {timestamp}")
+
+        # Draw a green rectangle around each detected person
+        for (x, y, w, h) in boxes:
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+
+    # --- Display the video and handle keyboard input ---
+    cv2.imshow('Person Detector', frame)
     key = cv2.waitKey(1) & 0xFF
 
     if key == ord('q'):
         break
     
     elif key == ord('l'):
-        # This LED control logic remains the same
         led_is_on = not led_is_on
         target_url = led_on_url if led_is_on else led_off_url
         try:
